@@ -103,6 +103,89 @@ pushy "chef-client" do
 end
 ```
 
-This cross-node orchestration doesn’t have to be a full-fledged chef run as seen above. You could use it to simply restart a whitelisted service if needed. 
+This cross-node orchestration doesn’t have to be a full-fledged chef run as seen above. You could use it to simply restart a whitelisted service if needed. Let's look at a tomcat recipe for Ubuntu that allows us to find our HAProxy server and start a chef-client run.
+
+```
+include_recipe "java"
+
+# define our packages to install
+tomcat_pkgs =  ["tomcat6","tomcat6-admin"]
+
+tomcat_pkgs.each do |pkg|
+  package pkg do
+    action :install
+  end
+end
+
+#setup the service to run
+service "tomcat" do
+  service_name "tomcat6"
+  supports :restart => true, :reload => true, :status => true
+  action [:enable, :start]
+end
+
+#intsall templates for the configs
+template "/etc/default/tomcat6" do
+  source "default_tomcat6.erb"
+  owner "root"
+  group "root"
+  mode "0644"
+  notifies :restart, resources(:service => "tomcat")
+end
+
+template "/etc/tomcat6/server.xml" do
+  source "server.xml.erb"
+  owner "root"
+  group "root"
+  mode "0644"
+  notifies :restart, resources(:service => "tomcat")
+end
+
+#search for our LB based on role and current environment, just return the name
+pool_members = partial_search("node", "role:tomcat_fe_lb AND chef_environment:#{node.chef_environment}", :keys => {
+               'name' => ['name']
+               }) || []
+
+pool_members.map! do |member|
+  member['hostname']
+end
+
+#run chef-client on the LB, don't wait
+pushy "chef-client-delay" do
+  action :run
+  wait false
+  nodes pool_members.uniq
+end
+```
+
+The real magic of this recipe is in the last several lines. First we query to get our loadbalancer, then we use this query result to execute the job `chef-client-delay` on the nodes that are part of our query result. The nodes attribute can be one node, or an array of nodes that you want the job to execute on.
+
+If you run a `knife job list` you should see your job running on the load balancer.
+
+```
+ricardoII:intro michael$ knife job list
+command:     chef-client-delay
+created_at:  Mon, 09 Dec 2013 06:09:05 GMT
+id:          6e0b432e3699018834ee0e199309e8a7
+run_timeout: 3600
+status:      running
+updated_at:  Mon, 09 Dec 2013 06:09:05 GMT
+```
+
+You can take the job id and query the job status by running `knife job status <id>` as so:
+
+```
+ricardoII:intro michael$ knife job status 6e0b432e3699018834ee0e199309e8a7
+command:     chef-client-delay
+created_at:  Mon, 09 Dec 2013 06:09:05 GMT
+id:          6e0b432e3699018834ee0e199309e8a7
+nodes:
+  succeeded: 1-lb-intro
+run_timeout: 3600
+status:      complete
+updated_at:  Mon, 09 Dec 2013 06:10:07 GMT
+```
+
+Or course, the the Chef API can also be used to directly query the results of a job, get a listing of jobs, or start jobs. The API is [fully documented](http://docs.opscode.com/api_pushy.html), and accessible under your normal Chef API endpoint.
 
 Hopefully this gives you a good idea on how to use Push Jobs, why it’s different than knife ssh, and gets you excited for the upcoming open source release. At Chef our goal is to provide our community with the primitive resources that they can use to make their jobs more delightful. Push Jobs are the first release of primitives to better orchestrate things like Continuous Delivery, Continuous Integration, and more complex use cases. 
